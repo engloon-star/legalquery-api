@@ -139,11 +139,11 @@ async def get_current_user(authorization: str = Header(...)) -> dict:
     if not authorization.startswith("Bearer "):
         raise HTTPException(401, "Invalid authorization header")
 
-    token = authorization.replace("Bearer ", "")
+    token = authorization.replace("Bearer ", "").strip()
 
     try:
+        # Step 1 — verify token with Supabase
         async with httpx.AsyncClient() as client:
-            # Try new Supabase auth endpoint first
             resp = await client.get(
                 f"{SUPABASE_URL}/auth/v1/user",
                 headers={
@@ -152,33 +152,42 @@ async def get_current_user(authorization: str = Header(...)) -> dict:
                 },
                 timeout=15,
             )
-
+        
+        log.info("Supabase auth response: %d", resp.status_code)
+        
         if resp.status_code != 200:
-            raise HTTPException(401, "Invalid or expired token")
+            log.error("Auth failed: %s", resp.text)
+            raise HTTPException(401, f"Token rejected by Supabase: {resp.text}")
 
         user_data = resp.json()
         user_id = user_data.get("id")
+        
         if not user_id:
-            raise HTTPException(401, "Invalid token — no user ID")
+            raise HTTPException(401, "No user ID in token")
 
-        # Fetch profile from Supabase
+        log.info("User authenticated: %s", user_id)
+
+        # Step 2 — get profile from database
         async with httpx.AsyncClient() as client:
             profile_resp = await client.get(
                 f"{SUPABASE_URL}/rest/v1/profiles",
                 headers={
                     "apikey": SUPABASE_SERVICE_KEY,
                     "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
                 },
                 params={"id": f"eq.{user_id}", "select": "*"},
                 timeout=10,
             )
 
+        log.info("Profile response: %d %s", profile_resp.status_code, profile_resp.text[:200])
         profiles = profile_resp.json()
 
-        # If profile does not exist yet create it
+        # Step 3 — create profile if missing
         if not profiles:
+            log.info("Profile not found — creating for user %s", user_id)
             async with httpx.AsyncClient() as client:
-                await client.post(
+                create_resp = await client.post(
                     f"{SUPABASE_URL}/rest/v1/profiles",
                     headers={
                         "apikey": SUPABASE_SERVICE_KEY,
@@ -194,29 +203,19 @@ async def get_current_user(authorization: str = Header(...)) -> dict:
                     },
                     timeout=10,
                 )
-            # Fetch again after creating
-            async with httpx.AsyncClient() as client:
-                profile_resp = await client.get(
-                    f"{SUPABASE_URL}/rest/v1/profiles",
-                    headers={
-                        "apikey": SUPABASE_SERVICE_KEY,
-                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                    },
-                    params={"id": f"eq.{user_id}", "select": "*"},
-                    timeout=10,
-                )
-            profiles = profile_resp.json()
+            log.info("Profile created: %d %s", create_resp.status_code, create_resp.text[:200])
+            profiles = create_resp.json()
 
         if not profiles:
-            raise HTTPException(401, "Profile not found")
+            raise HTTPException(500, "Could not find or create profile")
 
-        return profiles[0]
+        return profiles[0] if isinstance(profiles, list) else profiles
 
     except HTTPException:
         raise
     except Exception as e:
         log.error("Auth error: %s", e)
-        raise HTTPException(401, "Authentication failed")
+        raise HTTPException(401, f"Authentication failed: {str(e)}")
 
 
 # ─────────────────────────────────────────
