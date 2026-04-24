@@ -258,15 +258,21 @@ def get_page(session: requests.Session, page: int = 1) -> list:
         )
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Find results table
+# Find results table — class is tblResult gridView
         table = None
         for t in soup.find_all("table"):
-            rows = t.find_all("tr")
-            if len(rows) > 3:
-                headers = rows[0].get_text().lower()
-                if any(k in headers for k in ["nombor", "pihak", "hakim", "tarikh", "bil"]):
+            classes = t.get("class", [])
+            if "tblResult" in classes or "gridView" in classes:
+                rows = t.find_all("tr", recursive=False)
+                if len(rows) >= 1:
                     table = t
                     break
+                    
+        # Fallback — find table with most rows
+        if not table:
+            all_tables = soup.find_all("table")
+            if all_tables:
+                table = max(all_tables, key=lambda t: len(t.find_all("tr")))
 
         if not table:
             log.warning("Results table not found on page %d", page)
